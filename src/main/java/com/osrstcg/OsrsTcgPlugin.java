@@ -354,7 +354,7 @@ public class OsrsTcgPlugin extends Plugin
 		if ("webShareEnabled".equals(event.getKey()) || "webShareApiKey".equals(event.getKey()))
 		{
 			collectionShareService.onConfigChanged();
-			tcgPanel.updateWebShareLiveIndicator();
+			SwingUtilities.invokeLater(tcgPanel::updateWebShareLiveIndicator);
 		}
 		else if ("chatPrefixColor".equals(event.getKey()))
 		{

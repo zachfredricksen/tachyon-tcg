@@ -806,53 +806,50 @@ RuneLite mixes four execution contexts and this class touches all of them.
 | `refresh()` | anything | yes — `queueRefreshOnEdt()` when off-EDT ([L391](../src/main/java/com/osrstcg/ui/TcgPanel.java#L391)) |
 | `refreshAfterPackRevealClose()` | AWT input listener | yes — `invokeLater(this::refreshAfterPackRevealClose)` ([L417](../src/main/java/com/osrstcg/ui/TcgPanel.java#L417)) |
 | `applyPackCloseRefresh(...)` | `ForkJoinPool.commonPool` | yes — re-checks and re-posts ([L453](../src/main/java/com/osrstcg/ui/TcgPanel.java#L453)) |
-| `start()` | client thread (`startUp`) | **no** |
-| `stop()` | client thread (`shutDown`) | **no** |
-| `updateWebShareLiveIndicator()` | client thread from `onConfigChanged`; share-service scheduler via a wrapped listener | **only** at the listener site ([OsrsTcgPlugin.java:244](../src/main/java/com/osrstcg/OsrsTcgPlugin.java#L244)) |
-| `beginPackRevealSidebarFreeze()` / `clearPackRevealSidebarFreeze()` | client thread and EDT | **no** |
-| `syncRewardDraftFromPersistent()` | client thread | **no** |
-| `flushRewardTuningDraftToState()` | whatever thread called `addCredits`/`addCard`/… | **no** |
-| `performCollectionReset()` | EDT (button) and client thread (`::tcg-reset`) | **no** |
+| `start()` | **EDT** (`startUp`) | n/a — asserts EDT |
+| `stop()` | **EDT** (`shutDown`) | n/a — asserts EDT |
+| `updateWebShareLiveIndicator()` | `onConfigChanged`; share-service scheduler via a wrapped listener | yes — both call sites wrap ([OsrsTcgPlugin.java:244](../src/main/java/com/osrstcg/OsrsTcgPlugin.java#L244), [L357](../src/main/java/com/osrstcg/OsrsTcgPlugin.java#L357)) |
+| `beginPackRevealSidebarFreeze()` / `clearPackRevealSidebarFreeze()` | client thread and EDT | **no, by design** — see invariants |
+| `syncRewardDraftFromPersistent()` | client thread and EDT | **no** — `rewardDraftLock` instead |
+| `flushRewardTuningDraftToState()` | whatever thread called `addCredits`/`addCard`/… | **no** — `rewardDraftLock` instead |
+| `performCollectionReset()` | EDT (button) and client thread (`::tcg-reset`) | via `resetSessionUi()` → `refresh()` |
 | all `render*` / `build*` / `applyTabStyle` / `updateFooterVisibility` | assume EDT | n/a |
 
 Everything private and prefixed `render`, `build`, `apply`, or `update` assumes it is already on
 the EDT. `refreshNow()` is only reachable through `refresh()`'s EDT check, so that chain is
 sound.
 
-The gaps are real and worth knowing before you add to them:
+How the cross-thread state is kept safe, and what is still worth knowing:
 
-- **`updateWebShareLiveIndicator()` from `onConfigChanged`.**
-  [OsrsTcgPlugin.java:357](../src/main/java/com/osrstcg/OsrsTcgPlugin.java#L357) calls it
-  directly on the client thread. The method does `setVisible`, `putClientProperty`,
-  `setToolTipText`, and four `revalidate`/`repaint` pairs — all Swing calls off the EDT. The
-  sibling call site three lines earlier in `startUp` wraps the *listener* correctly, which makes
-  the omission look deliberate but it is not.
-- **`start()` and `stop()`.** Both run on the client thread during plugin lifecycle and touch
-  Swing directly: `start()` calls `updateWebShareLiveIndicator()` and `ensureRootAttached()`;
-  `stop()` calls `removeAll()` on three panels plus `revalidate`/`repaint`
-  ([L338-345](../src/main/java/com/osrstcg/ui/TcgPanel.java#L338)).
-- **`sidebarRevealSpoilerFreeze` and the three `*BuiltForActiveReveal` booleans are not
-  volatile** ([L197-201](../src/main/java/com/osrstcg/ui/TcgPanel.java#L197)) yet are written on
-  the client thread (`OsrsTcgPlugin.openBooster`) and read on the EDT (`renderSelectedTab`). There
-  is no happens-before edge, so the EDT can in principle miss the freeze and render live state
-  mid-reveal. Compare `panelVisible`, which *is* `volatile`
-  ([L192](../src/main/java/com/osrstcg/ui/TcgPanel.java#L192)), and `packCloseRefreshGen`, which
-  is an `AtomicLong`.
-- **`refreshQueued` is a plain `boolean`** ([L191](../src/main/java/com/osrstcg/ui/TcgPanel.java#L191))
-  read and written by `queueRefreshOnEdt` from both the client thread and the EDT. A lost update
-  either drops a coalesced refresh or schedules a redundant one; neither corrupts state, but the
-  dedupe is not reliable.
-- **The `rewardDraft*` fields** are written on the EDT by the spinner listeners and read on the
-  client thread by `flushRewardTuningDraftToState` (invoked from inside `synchronized`
-  `TcgStateService` methods). The `synchronized` block does not help — the panel fields are not
-  guarded by that monitor.
-- **`client.addChatMessage` from the EDT.** `performCollectionReset()`
-  ([L379](../src/main/java/com/osrstcg/ui/TcgPanel.java#L379)) and the booster buy button
-  ([L1945](../src/main/java/com/osrstcg/ui/TcgPanel.java#L1945)) call it directly. When those run
-  from a Swing action listener, that is a client-thread API being called off the client thread —
-  the mirror image of the problems above. `TcgPluginGameMessages.queuePrefixedGameMessage` (which
-  goes through `ChatMessageManager`) is the thread-safe alternative already used elsewhere in the
-  codebase.
+- **Cross-thread fields are `volatile`.** `sidebarRevealSpoilerFreeze` and the three
+  `*BuiltForActiveReveal` booleans are written on the client thread
+  (`OsrsTcgPlugin.openBooster`) and read on the EDT (`renderSelectedTab`), so all four are
+  `volatile` — as are `panelVisible` and `selectedTab`. `selectedTab` matters because
+  `performCollectionReset()` assigns it on the client thread for `::tcg-reset`; without
+  `volatile` the EDT could miss the switch to Welcome.
+- **`beginPackRevealSidebarFreeze()` publishes the snapshot last.** It clears the three
+  booleans first and assigns `sidebarRevealSpoilerFreeze` afterwards, so an EDT reader that
+  sees a non-null freeze is guaranteed to see the cleared flags too. Reversing those two steps
+  lets the EDT skip the rebuild and leave the *previous* pack's frozen content on screen for
+  the whole new reveal. `PackCloseSnapshot` has all-final fields and its map is a fresh copy,
+  so this safe-publication argument holds.
+- **`refreshQueued` is an `AtomicBoolean`** using `compareAndSet(false, true)`. A plain
+  `boolean` was worse than a benign lost update: with no happens-before edge the client thread
+  could never observe the EDT's reset, wedging the flag at `true` and silently dropping every
+  off-EDT refresh for the life of the panel.
+- **The `rewardDraft*` fields are guarded by `rewardDraftLock`**, not by `volatile`. Four
+  independent volatile reads still cannot form an atomic tuple, and
+  `flushRewardTuningDraftToState` needs a consistent one. Lock discipline: **never call into
+  `stateService` while holding `rewardDraftLock`.** The flush path already holds the
+  `TcgStateService` monitor when it takes the draft lock, so acquiring them in the other order
+  would invert and deadlock. `syncRewardDraftFromPersistent()` therefore reads state *before*
+  entering the lock, and the flush builds its `RewardTuningState` inside the lock but calls
+  `tryUpdateRewardTuning` outside it.
+- **Chat goes through `ChatMessageManager`, not `client.addChatMessage`.**
+  `performCollectionReset()` and the booster buy button run on the EDT, so they use
+  `TcgPluginGameMessages.queuePrefixedGameMessage`, which is thread-safe and drains on the
+  client thread. Two consequences: the message carries the configured prefix colour, and it
+  lands on the next client frame rather than instantly.
 - **`JOptionPane.showConfirmDialog` blocks the EDT** in both `promptAndPerformCollectionReset`
   and `promptAndSellDuplicates`. That is correct Swing usage, but it means the whole client UI
   stalls behind the dialog; do not call these from anywhere that is not a user gesture.
@@ -863,6 +860,11 @@ The gaps are real and worth knowing before you add to them:
   sites do ([TcgPanel.java:1951](../src/main/java/com/osrstcg/ui/TcgPanel.java#L1951),
   [OsrsTcgPlugin.java:723](../src/main/java/com/osrstcg/OsrsTcgPlugin.java#L723)). Calling it
   after `buyAndOpenPack` would snapshot post-transaction state and defeat the entire mechanism.
+  For the same reason it must stay **synchronous** on the calling thread — do not "fix" its
+  cross-thread access by wrapping it in `SwingUtilities.invokeLater`, which would defer the
+  capture until after the transaction. The `volatile` fields plus publish-last ordering are
+  what make it safe. The same applies to `clearPackRevealSidebarFreeze()` on the failure path:
+  deferring it leaves the `refresh()` on the next line rendering frozen stale numbers.
 - **Every failure path out of a purchase must call `clearPackRevealSidebarFreeze()`.** Miss one
   and the sidebar stays frozen until the next `refreshNow()` happens to notice no reveal is
   active — a window during which the player sees stale numbers.
