@@ -623,11 +623,24 @@ itself is treated as immutable and replaced wholesale (`state = state.withX(...)
   [TcgPanel.java:233](../src/main/java/com/osrstcg/ui/TcgPanel.java#L233) and has no call
   sites; it is dead weight rather than a bug, but do not assume the panel is config-reactive.
 
-### Open questions
+### Which thread runs `startUp()` / `shutDown()`
 
-- Which thread RuneLite's `PluginManager` uses to invoke `startUp()`/`shutDown()` could not
-  be confirmed from this repository (`net.runelite:client` is a `compileOnly` dependency
-  and its source is not vendored). The plugin code is defensive either way: `TcgPanel.refresh()`
-  self-marshals to the EDT and `queueGameMessage` self-marshals to the client thread. If you
-  add work to `startUp()` that touches Swing or the client directly, wrap it rather than
-  relying on an assumed context.
+**The EDT.** `PluginManager.startPlugin` and `PluginManager.stopPlugin` (verified against
+`net.runelite:client` 1.12.33 in the Gradle cache) both open with
+`assert SwingUtilities.isEventDispatchThread()` and then call `Plugin.startUp()` /
+`Plugin.shutDown()` inline — there is no client-thread hand-off. `PluginManager.startPlugins()`
+wraps its whole loop in `SwingUtilities.invokeAndWait`, and the plugin-list toggle calls
+`startPlugin`/`stopPlugin` straight from Swing action handlers. `build.gradle`'s `run` task
+passes `-ea`, so that assertion is live in development.
+
+Consequences for this plugin:
+
+- Swing work in `startUp()`/`shutDown()` needs **no** marshalling. `TcgPanel.start()` and
+  `TcgPanel.stop()` assert the EDT rather than wrapping, which documents the contract without
+  changing behaviour.
+- Client API calls from `startUp()` **do** need marshalling — which is exactly why
+  `queueGameMessage` ([OsrsTcgPlugin.java:508-517](../src/main/java/com/osrstcg/OsrsTcgPlugin.java#L508-L517))
+  routes `client.addChatMessage` through `clientThread.invokeLater`.
+- Do not "fix" `stop()` by deferring its body with a bare `SwingUtilities.invokeLater`. On a
+  rapid disable→enable that posts the clear behind the re-`start()`, blanking the sidebar until
+  the next refresh.
