@@ -20,6 +20,7 @@ import com.osrstcg.service.RollPoolFilter;
 import com.osrstcg.service.TcgStateService;
 import com.osrstcg.ui.collectionalbum.CollectionAlbumManager;
 import com.osrstcg.util.NumberFormatting;
+import com.osrstcg.util.TcgPluginGameMessages;
 import com.formdev.flatlaf.FlatClientProperties;
 import java.awt.BorderLayout;
 import java.awt.CardLayout;
@@ -50,6 +51,7 @@ import java.util.Locale;
 import java.util.Map;
 import java.util.Set;
 import java.util.concurrent.ForkJoinPool;
+import java.util.concurrent.atomic.AtomicBoolean;
 import java.util.concurrent.atomic.AtomicLong;
 import java.util.stream.Collectors;
 import javax.inject.Inject;
@@ -81,9 +83,9 @@ import javax.swing.text.StyleConstants;
 import javax.swing.text.StyledDocument;
 import lombok.Getter;
 import lombok.extern.slf4j.Slf4j;
-import net.runelite.api.ChatMessageType;
 import net.runelite.api.Client;
 import net.runelite.api.GameState;
+import net.runelite.client.chat.ChatMessageManager;
 import net.runelite.client.ui.ColorScheme;
 import net.runelite.client.ui.FontManager;
 import net.runelite.client.ui.PluginPanel;
@@ -163,6 +165,7 @@ public class TcgPanel extends PluginPanel
 	private final CollectionAlbumManager collectionAlbumManager;
 	private final CreditAwardService creditAwardService;
 	private final CollectionShareService collectionShareService;
+	private final ChatMessageManager chatMessageManager;
 	private final JButton sellDuplicatesButton;
 
 	private final JPanel mainPanel = new JPanel();
@@ -185,21 +188,33 @@ public class TcgPanel extends PluginPanel
 	private final JButton overviewTabButton = new JButton(Tab.OVERVIEW.getLabel());
 	private final JButton shopTabButton = new JButton(Tab.SHOP.getLabel());
 	private final Map<String, Long> scoreByCardName = new HashMap<>();
-	private Tab selectedTab = Tab.OVERVIEW;
+	/** Volatile: {@link #performCollectionReset()} assigns this on the client thread via {@code ::tcg-reset}. */
+	private volatile Tab selectedTab = Tab.OVERVIEW;
 	/** After first in-world refresh, {@link #selectedTab} is only user-driven unless reset clears progress. */
 	private boolean defaultTabSelectionInitialized;
-	private boolean refreshQueued;
+	/** Coalesces off-EDT refresh requests; see {@link #queueRefreshOnEdt()}. */
+	private final AtomicBoolean refreshQueued = new AtomicBoolean();
 	private volatile boolean panelVisible;
 	private int lastPanelWidthForLayout = -1;
 	/** Bumps when a new pack-close refresh is scheduled so stale async results are ignored. */
 	private final AtomicLong packCloseRefreshGen = new AtomicLong();
-	/** While a pack is opening, sidebar stats use this pre-transaction snapshot so pulls are not spoiled. */
-	private PackCloseSnapshot sidebarRevealSpoilerFreeze;
+	/**
+	 * While a pack is opening, sidebar stats use this pre-transaction snapshot so pulls are not spoiled.
+	 * Written on the client thread, read on the EDT; always assigned <em>after</em> the three
+	 * {@code *BuiltForActiveReveal} flags so a non-null read implies the flags are already cleared.
+	 */
+	private volatile PackCloseSnapshot sidebarRevealSpoilerFreeze;
 	/** During an active reveal, each tab is built at most once from {@link #sidebarRevealSpoilerFreeze}. */
-	private boolean welcomeBuiltForActiveReveal;
-	private boolean overviewBuiltForActiveReveal;
-	private boolean shopBuiltForActiveReveal;
+	private volatile boolean welcomeBuiltForActiveReveal;
+	private volatile boolean overviewBuiltForActiveReveal;
+	private volatile boolean shopBuiltForActiveReveal;
 
+	/**
+	 * Guards the {@code rewardDraft*} tuple so a client-thread flush cannot observe a half-applied
+	 * EDT edit. Never call into {@link #stateService} while holding it — the flush path already
+	 * holds the {@code TcgStateService} monitor, so taking them in the other order would invert.
+	 */
+	private final Object rewardDraftLock = new Object();
 	private int rewardDraftFoil = 1;
 	private double rewardDraftKill = 1.0d;
 	private double rewardDraftLevel = 1.0d;
@@ -220,6 +235,7 @@ public class TcgPanel extends PluginPanel
 		CollectionAlbumManager collectionAlbumManager,
 		CreditAwardService creditAwardService,
 		CollectionShareService collectionShareService,
+		ChatMessageManager chatMessageManager,
 		@Named("developerMode") boolean runeliteDeveloperMode)
 	{
 		super(false);
@@ -235,6 +251,7 @@ public class TcgPanel extends PluginPanel
 		this.collectionAlbumManager = collectionAlbumManager;
 		this.creditAwardService = creditAwardService;
 		this.collectionShareService = collectionShareService;
+		this.chatMessageManager = chatMessageManager;
 		this.sellDuplicatesButton = createSellDuplicatesButton();
 		this.webShareLiveIndicator = createWebShareLiveIndicator();
 
@@ -300,8 +317,10 @@ public class TcgPanel extends PluginPanel
 		panelVisible = isShowing();
 	}
 
+	/** Called from {@code OsrsTcgPlugin.startUp()}, which RuneLite's {@code PluginManager} runs on the EDT. */
 	public void start()
 	{
+		assert SwingUtilities.isEventDispatchThread();
 		cardDatabase.load();
 		packCatalog.load();
 		if (!runeliteDeveloperMode && stateService.isDebugLogging())
@@ -322,21 +341,31 @@ public class TcgPanel extends PluginPanel
 		{
 			return;
 		}
-		stateService.tryUpdateRewardTuning(
-			new RewardTuningState(rewardDraftFoil, rewardDraftKill, rewardDraftLevel, rewardDraftXp));
+		final RewardTuningState draft;
+		synchronized (rewardDraftLock)
+		{
+			draft = new RewardTuningState(rewardDraftFoil, rewardDraftKill, rewardDraftLevel, rewardDraftXp);
+		}
+		stateService.tryUpdateRewardTuning(draft);
 	}
 
 	public void syncRewardDraftFromPersistent()
 	{
+		// Read state outside the lock so we never hold rewardDraftLock while touching stateService.
 		RewardTuningState t = stateService.getState().getRewardTuning();
-		rewardDraftFoil = t.getFoilChancePercent();
-		rewardDraftKill = t.getKillCreditMultiplier();
-		rewardDraftLevel = t.getLevelUpCreditMultiplier();
-		rewardDraftXp = t.getXpCreditMultiplier();
+		synchronized (rewardDraftLock)
+		{
+			rewardDraftFoil = t.getFoilChancePercent();
+			rewardDraftKill = t.getKillCreditMultiplier();
+			rewardDraftLevel = t.getLevelUpCreditMultiplier();
+			rewardDraftXp = t.getXpCreditMultiplier();
+		}
 	}
 
+	/** Called from {@code OsrsTcgPlugin.shutDown()}, which RuneLite's {@code PluginManager} runs on the EDT. */
 	public void stop()
 	{
+		assert SwingUtilities.isEventDispatchThread();
 		welcomeContent.removeAll();
 		overviewContent.removeAll();
 		packsContent.removeAll();
@@ -374,11 +403,8 @@ public class TcgPanel extends PluginPanel
 		syncRewardDraftFromPersistent();
 		selectedTab = Tab.WELCOME;
 		resetSessionUi();
-		if (client != null)
-		{
-			client.addChatMessage(ChatMessageType.GAMEMESSAGE, "",
-				"[OSRS TCG] Collection, credits, and opened packs have been reset.", null);
-		}
+		TcgPluginGameMessages.queuePrefixedGameMessage(chatMessageManager,
+			"Collection, credits, and opened packs have been reset.");
 	}
 
 	public void refresh()
@@ -499,15 +525,14 @@ public class TcgPanel extends PluginPanel
 
 	private void queueRefreshOnEdt()
 	{
-		if (refreshQueued)
+		if (!refreshQueued.compareAndSet(false, true))
 		{
 			return;
 		}
 
-		refreshQueued = true;
 		SwingUtilities.invokeLater(() ->
 		{
-			refreshQueued = false;
+			refreshQueued.set(false);
 			refresh();
 		});
 	}
@@ -1075,10 +1100,13 @@ public class TcgPanel extends PluginPanel
 
 	public void beginPackRevealSidebarFreeze()
 	{
-		sidebarRevealSpoilerFreeze = capturePackCloseSnapshot();
+		// Must stay synchronous: openBooster() relies on this capturing pre-transaction state.
+		PackCloseSnapshot snapshot = capturePackCloseSnapshot();
 		welcomeBuiltForActiveReveal = false;
 		overviewBuiltForActiveReveal = false;
 		shopBuiltForActiveReveal = false;
+		// Published last so an EDT reader seeing non-null also sees the cleared flags above.
+		sidebarRevealSpoilerFreeze = snapshot;
 	}
 
 	public void clearPackRevealSidebarFreeze()
@@ -1305,22 +1333,38 @@ public class TcgPanel extends PluginPanel
 
 		foilSpin.addChangeListener(e ->
 		{
-			rewardDraftFoil = ((Number) foilSpin.getValue()).intValue();
+			int value = ((Number) foilSpin.getValue()).intValue();
+			synchronized (rewardDraftLock)
+			{
+				rewardDraftFoil = value;
+			}
 			SwingUtilities.invokeLater(this::refresh);
 		});
 		killSpin.addChangeListener(e ->
 		{
-			rewardDraftKill = ((Number) killSpin.getValue()).doubleValue();
+			double value = ((Number) killSpin.getValue()).doubleValue();
+			synchronized (rewardDraftLock)
+			{
+				rewardDraftKill = value;
+			}
 			SwingUtilities.invokeLater(this::refresh);
 		});
 		levelSpin.addChangeListener(e ->
 		{
-			rewardDraftLevel = ((Number) levelSpin.getValue()).doubleValue();
+			double value = ((Number) levelSpin.getValue()).doubleValue();
+			synchronized (rewardDraftLock)
+			{
+				rewardDraftLevel = value;
+			}
 			SwingUtilities.invokeLater(this::refresh);
 		});
 		xpSpin.addChangeListener(e ->
 		{
-			rewardDraftXp = ((Number) xpSpin.getValue()).doubleValue();
+			double value = ((Number) xpSpin.getValue()).doubleValue();
+			synchronized (rewardDraftLock)
+			{
+				rewardDraftXp = value;
+			}
 			SwingUtilities.invokeLater(this::refresh);
 		});
 
@@ -1940,10 +1984,9 @@ public class TcgPanel extends PluginPanel
 			if (packSafeModeService.isPackOpeningBlocked())
 			{
 				String blockMessage = packSafeModeService.packOpeningBlockMessage();
-				if (client != null && blockMessage != null)
+				if (blockMessage != null)
 				{
-					client.addChatMessage(ChatMessageType.GAMEMESSAGE, "",
-						"[OSRS TCG] " + blockMessage, null);
+					TcgPluginGameMessages.queuePrefixedGameMessage(chatMessageManager, blockMessage);
 				}
 				refresh();
 				return;
