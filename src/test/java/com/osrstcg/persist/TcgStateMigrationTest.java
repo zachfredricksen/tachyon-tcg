@@ -226,6 +226,37 @@ public class TcgStateMigrationTest
 		Assert.assertEquals(777L, result.getState().getEconomyState().getCredits());
 	}
 
+	@Test
+	public void staleConfigDoesNotShadowStrictlyNewerDiskSave()
+	{
+		// Config is only written on logout/shutdown/unload, so it can lag hours behind
+		// the throttled disk snapshots; the newer disk state must win on load.
+		putEncodedConfig(SCHEMA_5_JSON); // profileSavedAtUnix = 1700000100
+
+		String newer = "{"
+			+ "\"schemaVersion\":6,\"credits\":999,\"openedPacks\":9,"
+			+ "\"cardEntries\":["
+			+ "{\"cardName\":\"Abyssal whip\",\"variants\":[{\"pulledBy\":\"P\",\"pulledAt\":1}]},"
+			+ "{\"cardName\":\"Dragon dagger\",\"variants\":[{\"pulledBy\":\"P\",\"pulledAt\":2}]}"
+			+ "],"
+			+ "\"totalCreditsGained\":999,"
+			+ "\"profileCreatedAtUnix\":1700000000,"
+			+ "\"profileSavedAtUnix\":1700040000,"
+			+ "\"skillCreditBaseline\":{\"skillXp\":{},\"uncreditedXp\":0}"
+			+ "}";
+		diskStore.writeSnapshot(TcgStateStorageEncoding.encode(newer), 2, 999L, TcgSaveTrigger.LOGOUT);
+
+		TcgStateLoadResult result = store.load();
+
+		Assert.assertNotEquals(TcgStateLoadSource.CONFIG, result.getSource());
+		Assert.assertEquals(999L, result.getState().getEconomyState().getCredits());
+		Assert.assertEquals(2, result.getState().getCollectionState().getOwnedInstances().size());
+
+		// The migration seed must also come from the freshest source, not the stale config.
+		TcgState master = diskStore.loadMaster().orElseThrow();
+		Assert.assertEquals(999L, master.getEconomyState().getCredits());
+	}
+
 	private void putEncodedConfig(String plainJson)
 	{
 		String blob = TcgStateStorageEncoding.encode(plainJson);

@@ -59,6 +59,7 @@ import javax.inject.Singleton;
 import javax.swing.BorderFactory;
 import javax.swing.Box;
 import javax.swing.BoxLayout;
+import javax.swing.GrayFilter;
 import javax.swing.ImageIcon;
 import javax.swing.JButton;
 import javax.swing.JCheckBox;
@@ -261,6 +262,7 @@ public class TcgPanel extends PluginPanel
 
 		content.setLayout(contentLayout);
 		content.setOpaque(false);
+		content.setMinimumSize(new Dimension(0, 0));
 		welcomeContent.setLayout(new BorderLayout());
 		welcomeContent.setOpaque(false);
 		initializeTabContentPanel(overviewContent);
@@ -394,7 +396,7 @@ public class TcgPanel extends PluginPanel
 	public void performCollectionReset()
 	{
 		stateService.resetAll();
-		packRevealService.reset();
+		packRevealService.discardActiveReveal();
 		clearPackRevealSidebarFreeze();
 		creditAwardService.resetExperienceCreditBaseline();
 		syncRewardDraftFromPersistent();
@@ -497,7 +499,7 @@ public class TcgPanel extends PluginPanel
 		{
 			overviewContent.removeAll();
 			renderOverviewTabFromMetrics(overviewContent, snap, metrics, stateService.getState());
-			contentLayout.show(content, Tab.OVERVIEW.name());
+			showTabContent(Tab.OVERVIEW);
 		}
 		else if (selectedTab == Tab.SHOP)
 		{
@@ -509,7 +511,7 @@ public class TcgPanel extends PluginPanel
 		{
 			welcomeContent.removeAll();
 			renderWelcomeTab(welcomeContent);
-			contentLayout.show(content, Tab.WELCOME.name());
+			showTabContent(Tab.WELCOME);
 		}
 		else
 		{
@@ -655,7 +657,7 @@ public class TcgPanel extends PluginPanel
 		updateTabStyles();
 		welcomeContent.removeAll();
 		renderWelcomeTab(welcomeContent);
-		contentLayout.show(content, Tab.WELCOME.name());
+		showTabContent(Tab.WELCOME);
 	}
 
 	/**
@@ -915,7 +917,7 @@ public class TcgPanel extends PluginPanel
 					renderWelcomeTab(activePanel);
 					welcomeBuiltForActiveReveal = true;
 				}
-				contentLayout.show(content, selectedTab.name());
+				showTabContent(selectedTab);
 				return;
 			}
 			if (selectedTab == Tab.OVERVIEW)
@@ -926,7 +928,7 @@ public class TcgPanel extends PluginPanel
 					renderOverviewTab(activePanel);
 					overviewBuiltForActiveReveal = true;
 				}
-				contentLayout.show(content, selectedTab.name());
+				showTabContent(selectedTab);
 				return;
 			}
 			if (selectedTab == Tab.SHOP)
@@ -941,7 +943,7 @@ public class TcgPanel extends PluginPanel
 				return;
 			}
 			log.warn("Unsupported tab {}", selectedTab);
-			contentLayout.show(content, selectedTab.name());
+			showTabContent(selectedTab);
 			return;
 		}
 
@@ -1060,9 +1062,10 @@ public class TcgPanel extends PluginPanel
 			{
 				continue;
 			}
-			JButton buy = createBoosterBuyButton(row.booster, row.progressOwn, row.progressFoilOwn, row.progressTotal);
 			int price = row.booster.getPrice();
-			buy.setEnabled(credits >= price);
+			boolean canBuy = credits >= price;
+			JButton buy = createBoosterBuyButton(row.booster, row.progressOwn, row.progressFoilOwn, row.progressTotal, canBuy);
+			buy.setEnabled(canBuy);
 			grid.add(buy);
 		}
 
@@ -1882,9 +1885,10 @@ public class TcgPanel extends PluginPanel
 		long credits = displaySnap.credits;
 		for (BoosterPackDefinition booster : boosters)
 		{
-			JButton buy = createBoosterBuyButton(booster, allCards, rollPool, owned);
 			int price = booster.getPrice();
-			buy.setEnabled(!revealBusy && !packOpeningBlocked && credits >= price);
+			boolean canBuy = credits >= price;
+			JButton buy = createBoosterBuyButton(booster, allCards, rollPool, owned, canBuy);
+			buy.setEnabled(!revealBusy && !packOpeningBlocked && canBuy);
 			if (packOpeningBlocked)
 			{
 				String blockMessage = packSafeModeService.packOpeningBlockMessage();
@@ -1926,7 +1930,7 @@ public class TcgPanel extends PluginPanel
 		return TcgPanel.class.getResource("/" + SHOP_DEFAULT_PACK_THUMBNAIL);
 	}
 
-	private JButton createBoosterBuyButton(BoosterPackDefinition booster, int progressOwn, int progressFoilOwn, int progressTotal)
+	private JButton createBoosterBuyButton(BoosterPackDefinition booster, int progressOwn, int progressFoilOwn, int progressTotal, boolean canBuy)
 	{
 		int price = booster.getPrice();
 		String title = booster.getName() == null ? "Booster" : booster.getName();
@@ -1942,7 +1946,12 @@ public class TcgPanel extends PluginPanel
 		URL packIconUrl = shopPackIconUrl(booster);
 		if (packIconUrl != null)
 		{
-			JLabel iconLabel = new JLabel(new ImageIcon(packIconUrl));
+			ImageIcon icon = new ImageIcon(packIconUrl);
+			if (!canBuy)
+			{
+				icon = new ImageIcon(GrayFilter.createDisabledImage(icon.getImage()));
+			}
+			JLabel iconLabel = new JLabel(icon);
 			iconLabel.setAlignmentX(Component.CENTER_ALIGNMENT);
 			iconLabel.setBorder(new EmptyBorder(0, 0, 5, 0));
 			content.add(iconLabel);
@@ -2091,10 +2100,11 @@ public class TcgPanel extends PluginPanel
 		BoosterPackDefinition booster,
 		List<CardDefinition> allCards,
 		List<CardDefinition> rollPool,
-		Map<CardCollectionKey, Integer> owned)
+		Map<CardCollectionKey, Integer> owned,
+		boolean canBuy)
 	{
 		int[] progress = shopProgressOwnedTotal(booster, allCards, rollPool, owned);
-		return createBoosterBuyButton(booster, progress[0], progress[1], progress[2]);
+		return createBoosterBuyButton(booster, progress[0], progress[1], progress[2], canBuy);
 	}
 
 	private JPanel sellDuplicatesPanel()
@@ -2110,7 +2120,8 @@ public class TcgPanel extends PluginPanel
 	private void updateSellDuplicatesButtonState()
 	{
 		List<OwnedCardInstance> instances = stateService.getState().getCollectionState().getOwnedInstances();
-		boolean hasDuplicates = DuplicateSellPlanner.hasSellableDuplicates(instances);
+		boolean hasDuplicates = DuplicateSellPlanner.hasSellableDuplicates(instances, config.keepVersion(),
+			cardDatabase.displayTiersByCardName()::get, config.keepTier());
 		sellDuplicatesButton.setEnabled(hasDuplicates);
 		sellDuplicatesButton.setToolTipText(hasDuplicates ? null : "No duplicate cards to sell.");
 	}
@@ -2125,7 +2136,8 @@ public class TcgPanel extends PluginPanel
 			return;
 		}
 
-		DuplicateSellPlanner.Result plan = DuplicateSellPlanner.plan(all, this::cardDefinitionForName);
+		DuplicateSellPlanner.Result plan = DuplicateSellPlanner.plan(all, this::cardDefinitionForName, config.keepVersion(),
+			cardDatabase.displayTiersByCardName()::get, config.keepTier());
 		int cardsSold = plan.getCardsSold();
 		long creditsToAdd = plan.getCreditsToAdd();
 

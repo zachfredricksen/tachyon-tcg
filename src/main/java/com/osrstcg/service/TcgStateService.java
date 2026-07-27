@@ -690,6 +690,9 @@ public class TcgStateService
 	}
 
 	/**
+	 * Charges the pack and adds pulls in one step. Prefer {@link #chargePackOpenPurchase} at buy time and
+	 * {@link #commitPackPulls} when the reveal overlay closes so collection / PluginMessage stay spoiler-safe.
+	 *
 	 * @param allowZeroPrice when true, {@code packPrice == 0} is allowed (debug-only free packs). Provenance is tagged
 	 * with {@link OwnedCardInstance#DEBUG_PULL_METADATA_PREFIX} when {@code allowZeroPrice} or saved Overview debug
 	 * logging is enabled.
@@ -701,6 +704,20 @@ public class TcgStateService
 		{
 			return false;
 		}
+		if (!chargePackOpenPurchase(packPrice, allowZeroPrice))
+		{
+			return false;
+		}
+		return commitPackPulls(pulls, pullerDisplayName, allowZeroPrice);
+	}
+
+	/**
+	 * Deducts pack price and increments opened-packs. Does not mutate the collection or notify collection listeners.
+	 *
+	 * @param allowZeroPrice when true, {@code packPrice == 0} is allowed (debug-only free packs)
+	 */
+	public synchronized boolean chargePackOpenPurchase(long packPrice, boolean allowZeroPrice)
+	{
 		if (packPrice < 0L)
 		{
 			return false;
@@ -714,6 +731,26 @@ public class TcgStateService
 
 		long currentCredits = state.getEconomyState().getCredits();
 		if (currentCredits < packPrice)
+		{
+			return false;
+		}
+
+		state = state
+			.withCredits(currentCredits - packPrice)
+			.withOpenedPacks(state.getEconomyState().getOpenedPacks() + 1L);
+		saveMasterOnly(TcgSaveTrigger.COLLECTION_CHANGE);
+		return true;
+	}
+
+	/**
+	 * Adds pack pulls to the collection and notifies listeners (including the owned-names PluginMessage API).
+	 *
+	 * @param allowZeroPrice when true (or when Overview debug logging is on), provenance is tagged with
+	 * {@link OwnedCardInstance#DEBUG_PULL_METADATA_PREFIX}
+	 */
+	public synchronized boolean commitPackPulls(List<PackCardResult> pulls, String pullerDisplayName, boolean allowZeroPrice)
+	{
+		if (pulls == null || pulls.isEmpty())
 		{
 			return false;
 		}
@@ -737,10 +774,7 @@ public class TcgStateService
 		}
 
 		CollectionState nextColl = state.getCollectionState().withInstancesAdded(pulled);
-		state = state
-			.withCredits(currentCredits - packPrice)
-			.withOpenedPacks(state.getEconomyState().getOpenedPacks() + 1L)
-			.withCollection(nextColl);
+		state = state.withCollection(nextColl);
 		saveMasterOnly(TcgSaveTrigger.COLLECTION_CHANGE);
 		notifyCollectionShareListeners();
 		return true;

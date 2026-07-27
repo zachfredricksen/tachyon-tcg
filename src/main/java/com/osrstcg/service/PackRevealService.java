@@ -20,6 +20,7 @@ import java.util.Set;
 import java.util.concurrent.ThreadLocalRandom;
 import java.util.stream.Collectors;
 import javax.inject.Inject;
+import javax.inject.Provider;
 import javax.inject.Singleton;
 import lombok.Value;
 
@@ -153,6 +154,8 @@ public class PackRevealService
 	private final WikiImageCacheService imageCacheService;
 	private final PackRevealSoundService packRevealSoundService;
 	private final PullNotificationService pullNotificationService;
+	/** Provider avoids a Guice cycle: PackOpening → PackSafeMode → PackReveal → PackOpening. */
+	private final Provider<PackOpeningService> packOpeningService;
 
 	private Phase phase = Phase.IDLE;
 	private List<RevealCard> cards = List.of();
@@ -169,15 +172,22 @@ public class PackRevealService
 	private boolean apexPackOpen;
 	/** Wall-clock ms until which the first-pack scroll hint is shown; {@code 0} = off. */
 	private long scrollWheelHintUntilMs;
+	/**
+	 * Pulls charged at pack buy but not yet written to the collection. Committed when the overlay closes
+	 * ({@link #reset()}); cleared without commit on {@link #discardActiveReveal()}.
+	 */
+	private List<PackCardResult> pendingCollectionPulls = List.of();
 
 	@Inject
 	public PackRevealService(CardDatabase cardDatabase, WikiImageCacheService imageCacheService,
-		PackRevealSoundService packRevealSoundService, PullNotificationService pullNotificationService)
+		PackRevealSoundService packRevealSoundService, PullNotificationService pullNotificationService,
+		Provider<PackOpeningService> packOpeningService)
 	{
 		this.cardDatabase = cardDatabase;
 		this.imageCacheService = imageCacheService;
 		this.packRevealSoundService = packRevealSoundService;
 		this.pullNotificationService = pullNotificationService;
+		this.packOpeningService = packOpeningService;
 	}
 
 	public synchronized void startReveal(List<PackCardResult> pulls)
@@ -215,9 +225,12 @@ public class PackRevealService
 	public synchronized void startReveal(List<PackCardResult> pulls, Set<CardCollectionKey> preOwnedCards,
 		String boosterTitle, String boosterPackId, boolean showScrollWheelOverlayHint, boolean apexPackOpen)
 	{
+		// Finish any prior deferred collection write before starting a new reveal session.
+		commitPendingCollectionLocked();
+
 		if (pulls == null || pulls.isEmpty())
 		{
-			reset();
+			clearRevealStateLocked();
 			return;
 		}
 
@@ -233,6 +246,7 @@ public class PackRevealService
 		rebuildRarityTierIndex();
 
 		List<RevealCard> resolved = new ArrayList<>();
+		List<PackCardResult> pendingPulls = new ArrayList<>();
 		Set<String> preOwnedKeys = preOwnedCards == null ? Set.of() : preOwnedCards.stream()
 			.filter(Objects::nonNull)
 			.map(k -> normalizeKey(k.getCardName(), k.isFoil()))
@@ -257,10 +271,12 @@ public class PackRevealService
 			long denominator = RarityMath.denominatorForTierCard(tier, tierPopulation.getOrDefault(tier, 1));
 			boolean isNew = !preOwnedKeys.contains(normalizeKey(pull.getCardName(), pull.isFoil()));
 			resolved.add(new RevealCard(pull, definition, tier, rarityColor, denominator, isNew));
+			pendingPulls.add(pull);
 		}
 
 		Collections.shuffle(resolved, ThreadLocalRandom.current());
 		this.cards = List.copyOf(resolved);
+		this.pendingCollectionPulls = List.copyOf(pendingPulls);
 		imageCacheService.preload(this.cards.stream()
 			.map(c -> c.getDefinition() == null ? null : c.getDefinition().getImageUrl())
 			.collect(Collectors.toList()));
@@ -269,6 +285,11 @@ public class PackRevealService
 		this.dinkEndNotificationsSent = false;
 		this.phaseStartedAt = 0L;
 		this.phase = cards.isEmpty() ? Phase.IDLE : Phase.PACK_READY;
+		if (cards.isEmpty())
+		{
+			// Buy already charged; still try to commit whatever valid pulls we were given.
+			commitPendingCollectionLocked();
+		}
 	}
 
 	public synchronized void handleClick(Point click, Rectangle packBounds, List<Rectangle> cardBounds)
@@ -548,24 +569,30 @@ public class PackRevealService
 		return boosterPackId;
 	}
 
+	/**
+	 * Ends the reveal overlay and commits any deferred pack pulls to the collection (fires collection listeners /
+	 * PluginMessage). Use {@link #discardActiveReveal()} when the collection is being wiped or replaced instead.
+	 */
 	public synchronized void reset()
 	{
-		phase = Phase.IDLE;
-		cards = List.of();
-		revealedCount = 0;
-		revealedByIndex = new boolean[0];
-		dinkEndNotificationsSent = false;
-		phaseStartedAt = 0L;
-		cardPoolSize = 0;
-		boosterDisplayName = "";
-		boosterPackId = "";
-		apexPackOpen = false;
-		scrollWheelHintUntilMs = 0L;
+		commitPendingCollectionLocked();
+		clearRevealStateLocked();
+	}
+
+	/**
+	 * Ends the reveal overlay without adding pending pulls (collection wipe, save load, debug profile reset).
+	 * Does not refund the pack charge.
+	 */
+	public synchronized void discardActiveReveal()
+	{
+		pendingCollectionPulls = List.of();
+		packRevealSoundService.hardStop();
+		clearRevealStateLocked();
 	}
 
 	/**
 	 * Stops an active reveal (e.g. Safe-mode combat interrupt). Announces party highlights for unrevealed slots,
-	 * then returns the pulled cards for chat. Cards are already in the collection from pack open.
+	 * commits pulls to the collection, then returns the pulled cards for chat.
 	 */
 	public synchronized List<RevealCard> abortActiveReveal()
 	{
@@ -578,6 +605,37 @@ public class PackRevealService
 		packRevealSoundService.hardStop();
 		reset();
 		return snapshot;
+	}
+
+	private void commitPendingCollectionLocked()
+	{
+		List<PackCardResult> pending = pendingCollectionPulls;
+		pendingCollectionPulls = List.of();
+		if (pending.isEmpty() || packOpeningService == null)
+		{
+			return;
+		}
+		PackOpeningService opening = packOpeningService.get();
+		if (opening == null)
+		{
+			return;
+		}
+		opening.commitPackPulls(pending);
+	}
+
+	private void clearRevealStateLocked()
+	{
+		phase = Phase.IDLE;
+		cards = List.of();
+		revealedCount = 0;
+		revealedByIndex = new boolean[0];
+		dinkEndNotificationsSent = false;
+		phaseStartedAt = 0L;
+		cardPoolSize = 0;
+		boosterDisplayName = "";
+		boosterPackId = "";
+		apexPackOpen = false;
+		scrollWheelHintUntilMs = 0L;
 	}
 
 	private double clamp01(double value)

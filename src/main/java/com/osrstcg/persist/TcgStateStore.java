@@ -52,6 +52,15 @@ public class TcgStateStore
 			{
 				log.info("OSRS TCG state has no integrity hash yet; it will be written on next checkpoint.");
 			}
+
+			TcgStateLoadResult newerDisk = newerDiskState(config.state);
+			if (newerDisk != null)
+			{
+				log.warn("OSRS TCG profile configuration is stale (saved {}); restoring newer disk save (saved {}).",
+					config.state.getProfileSavedAtUnix(), newerDisk.getState().getProfileSavedAtUnix());
+				return newerDisk;
+			}
+
 			return new TcgStateLoadResult(config.state, TcgStateLoadSource.CONFIG);
 		}
 
@@ -82,6 +91,39 @@ public class TcgStateStore
 		}
 
 		return new TcgStateLoadResult(TcgState.empty(), TcgStateLoadSource.EMPTY, configFailed, configFailed);
+	}
+
+	/**
+	 * Returns the freshest on-disk state when its {@code profileSavedAtUnix} is strictly
+	 * newer than the config state's, or null when config is current or has no timestamp.
+	 */
+	private TcgStateLoadResult newerDiskState(TcgState configState)
+	{
+		if (fileBackupStore == null || configState.getProfileSavedAtUnix() <= 0)
+		{
+			return null;
+		}
+
+		TcgState best = null;
+		TcgStateLoadSource source = null;
+		long bestSavedAt = configState.getProfileSavedAtUnix();
+
+		Optional<TcgState> master = fileBackupStore.loadMaster();
+		if (master.isPresent() && master.get().getProfileSavedAtUnix() > bestSavedAt)
+		{
+			best = master.get();
+			source = TcgStateLoadSource.DISK;
+			bestSavedAt = best.getProfileSavedAtUnix();
+		}
+
+		Optional<TcgState> snapshot = fileBackupStore.loadMostRecentSnapshot();
+		if (snapshot.isPresent() && snapshot.get().getProfileSavedAtUnix() > bestSavedAt)
+		{
+			best = snapshot.get();
+			source = TcgStateLoadSource.DISK_SNAPSHOT;
+		}
+
+		return best == null ? null : new TcgStateLoadResult(best, source);
 	}
 
 	public Optional<TcgState> loadMaster()
@@ -306,15 +348,26 @@ public class TcgStateStore
 				: tryLoadConfig(STATE_BACKUP_KEY, STATE_BACKUP_HASH_KEY);
 			if (backup.outcome == LoadOutcome.SUCCESS)
 			{
-				String json = stateCodec.toJson(backup.state);
+				TcgState seed = backup.state;
+				Optional<TcgState> newestSnapshot = fileBackupStore.loadMostRecentSnapshot();
+				if (newestSnapshot.isPresent()
+					&& seed.getProfileSavedAtUnix() > 0
+					&& newestSnapshot.get().getProfileSavedAtUnix() > seed.getProfileSavedAtUnix())
+				{
+					log.warn("OSRS TCG migration: newest disk snapshot (saved {}) is newer than profile configuration (saved {}); seeding tcg.save from the snapshot.",
+						newestSnapshot.get().getProfileSavedAtUnix(), seed.getProfileSavedAtUnix());
+					seed = newestSnapshot.get();
+				}
+
+				String json = stateCodec.toJson(seed);
 				String stored = TcgStateStorageEncoding.encode(json);
 				if (!stored.isEmpty())
 				{
-					int cardCount = backup.state.getCollectionState().getOwnedInstances().size();
-					long credits = backup.state.getEconomyState().getCredits();
+					int cardCount = seed.getCollectionState().getOwnedInstances().size();
+					long credits = seed.getEconomyState().getCredits();
 					fileBackupStore.writeMaster(stored, cardCount, credits, TcgSaveTrigger.MIGRATION);
 					fileBackupStore.writeSnapshot(stored, cardCount, credits, TcgSaveTrigger.MIGRATION);
-					log.info("OSRS TCG seeded disk saves from profile configuration during migration.");
+					log.info("OSRS TCG seeded disk saves during migration.");
 				}
 			}
 		}

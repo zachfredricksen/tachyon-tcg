@@ -151,33 +151,56 @@ public class PackOpeningService
 		}
 
 		List<PackCardResult> pulls = rollPack(packRollPool, rollPool, DEFAULT_PACK_SIZE, apexTopThreeTierOnly, foilChanceMultiplier);
-		Map<CardCollectionKey, Integer> ownedBefore;
-		synchronized (stateService)
-		{
-			ownedBefore = new HashMap<>(stateService.getState().getCollectionState().getOwnedCards());
-		}
-		if (!stateService.applyPackOpenTransaction(packPrice, pulls, localPullerDisplayName()))
+		// Charge now; collection + PluginMessage wait until the reveal overlay closes (see commitPackPulls).
+		if (!stateService.chargePackOpenPurchase(packPrice, false))
 		{
 			return PackOpenResult.failed("Pack transaction failed.", creditsBefore, packPrice);
-		}
-
-		if (partyAnnouncer != null)
-		{
-			Map<CardCollectionKey, Integer> ownedAfter;
-			synchronized (stateService)
-			{
-				ownedAfter = new HashMap<>(stateService.getState().getCollectionState().getOwnedCards());
-			}
-			for (String category : CollectionSetCompletionUtil.newlyCompletedPrimaryCategories(ownedBefore, ownedAfter, rollPool))
-			{
-				partyAnnouncer.announceCollectionSetComplete(category);
-			}
 		}
 
 		long creditsAfter = stateService.getCredits();
 		String packId = booster.getId() == null ? "" : booster.getId().trim();
 		return PackOpenResult.succeeded("Pack opened.", creditsBefore, creditsAfter, packPrice, pulls,
 			booster.getName(), packId, apexTopThreeTierOnly);
+	}
+
+	/**
+	 * Adds pulls from a finished pack reveal to the collection (notifies PluginMessage / share listeners) and
+	 * announces any newly completed primary-category sets.
+	 */
+	public void commitPackPulls(List<PackCardResult> pulls)
+	{
+		if (pulls == null || pulls.isEmpty())
+		{
+			return;
+		}
+
+		Map<CardCollectionKey, Integer> ownedBefore;
+		synchronized (stateService)
+		{
+			ownedBefore = new HashMap<>(stateService.getState().getCollectionState().getOwnedCards());
+		}
+
+		if (!stateService.commitPackPulls(pulls, localPullerDisplayName(), false))
+		{
+			return;
+		}
+
+		if (partyAnnouncer == null)
+		{
+			return;
+		}
+
+		cardDatabase.load();
+		List<CardDefinition> rollPool = RollPoolFilter.filterRollPool(cardDatabase.getCards());
+		Map<CardCollectionKey, Integer> ownedAfter;
+		synchronized (stateService)
+		{
+			ownedAfter = new HashMap<>(stateService.getState().getCollectionState().getOwnedCards());
+		}
+		for (String category : CollectionSetCompletionUtil.newlyCompletedPrimaryCategories(ownedBefore, ownedAfter, rollPool))
+		{
+			partyAnnouncer.announceCollectionSetComplete(category);
+		}
 	}
 
 	/**

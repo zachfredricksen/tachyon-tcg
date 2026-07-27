@@ -251,6 +251,9 @@ public class OsrsTcgPlugin extends Plugin
 	@Override
 	protected void shutDown()
 	{
+		// Commit deferred pack pulls before the unload checkpoint so they are not lost.
+		packRevealService.reset();
+
 		// Flush skill baselines + write RSProfile and local tcg.save / snapshot before teardown.
 		creditAwardService.flushSkillBaselineForPersist();
 		stateService.saveFullCheckpoint(TcgSaveTrigger.PLUGIN_UNLOAD);
@@ -288,7 +291,6 @@ public class OsrsTcgPlugin extends Plugin
 		mouseManager.unregisterMouseWheelListener(packRevealInputListener);
 		keyManager.unregisterKeyListener(packRevealInputListener);
 		packRevealSoundService.hardStop();
-		packRevealService.reset();
 		collectionAlbumManager.dispose();
 		tradeWindowManager.dispose();
 		saveRestoreManager.dispose();
@@ -303,8 +305,9 @@ public class OsrsTcgPlugin extends Plugin
 	@Subscribe
 	public void onClientShutdown(ClientShutdown event)
 	{
-		// Must write RSProfile keys synchronously before ConfigManager's ClientShutdown
-		// handler (priority -100) runs sendConfig(); an async Future finishes too late.
+		// Commit deferred pack pulls, then write RSProfile keys synchronously before ConfigManager's
+		// ClientShutdown handler (priority -100) runs sendConfig(); an async Future finishes too late.
+		packRevealService.reset();
 		stateService.saveFullCheckpoint(TcgSaveTrigger.CLIENT_SHUTDOWN);
 	}
 
@@ -330,6 +333,8 @@ public class OsrsTcgPlugin extends Plugin
 		if (gs == GameState.LOGIN_SCREEN)
 		{
 			fileBackupLoadUsedThisSession = false;
+			packRevealService.reset();
+			tcgPanel.clearPackRevealSidebarFreeze();
 			stateService.saveFullCheckpoint(TcgSaveTrigger.LOGOUT);
 			collectionShareService.onLoggedOut();
 		}
@@ -450,7 +455,7 @@ public class OsrsTcgPlugin extends Plugin
 		creditAwardService.resetExperienceCreditBaseline();
 		if (loadResult != null && loadResult.isDebugResetOnLoad())
 		{
-			packRevealService.reset();
+			packRevealService.discardActiveReveal();
 			tcgPanel.clearPackRevealSidebarFreeze();
 			tcgPanel.syncRewardDraftFromPersistent();
 			tcgPanel.resetSessionUi();
@@ -657,7 +662,7 @@ public class OsrsTcgPlugin extends Plugin
 			// Collection/economy come from the save; skill baselines become this profile's live stats.
 			creditAwardService.rebaseExperienceCreditBaselineToCurrentStats();
 			stateService.saveCheckpoint(TcgSaveTrigger.LOAD);
-			packRevealService.reset();
+			packRevealService.discardActiveReveal();
 			tcgPanel.clearPackRevealSidebarFreeze();
 			tcgPanel.syncRewardDraftFromPersistent();
 			tcgPanel.refresh();

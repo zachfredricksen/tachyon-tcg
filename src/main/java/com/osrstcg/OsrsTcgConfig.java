@@ -1,6 +1,8 @@
 package com.osrstcg;
 
 import com.osrstcg.model.DinkNotificationTrigger;
+import com.osrstcg.model.DuplicateKeepTier;
+import com.osrstcg.model.DuplicateKeepVersion;
 import com.osrstcg.model.PullNotifyTier;
 import java.awt.Color;
 import net.runelite.client.config.Config;
@@ -55,11 +57,23 @@ public interface OsrsTcgConfig extends Config
 	}
 
 	@ConfigItem(
+		keyName = "runeliteNotifications",
+		name = "Runelite notifications",
+		description = "Enable certain notifications to be sent through Runelite's default notification service as well.",
+		section = generalSection,
+		position = 3
+	)
+	default boolean runeliteNotifications()
+	{
+		return false;
+	}
+
+	@ConfigItem(
 		keyName = "enableSounds",
 		name = "Enable pack opening sounds",
 		description = "Play sounds when opening packs.",
 		section = generalSection,
-		position = 3
+		position = 4
 	)
 	default boolean enableSounds()
 	{
@@ -71,7 +85,7 @@ public interface OsrsTcgConfig extends Config
 		name = "Enable transfer sound",
 		description = "Play a sound when a card trade finishes.",
 		section = generalSection,
-		position = 4
+		position = 5
 	)
 	default boolean enableTransferSound()
 	{
@@ -83,7 +97,7 @@ public interface OsrsTcgConfig extends Config
 		name = "Rarity Highlight",
 		description = "Show rarity when hovering unflipped pack cards.",
 		section = generalSection,
-		position = 5
+		position = 6
 	)
 	default boolean packRarityHighlight()
 	{
@@ -96,7 +110,7 @@ public interface OsrsTcgConfig extends Config
 		description = "Show the rarity name above unflipped pack cards on hover. Helps colour blind users "
 			+ "tell rarities apart without relying on the highlight colour.",
 		section = generalSection,
-		position = 6
+		position = 7
 	)
 	default boolean packRarityText()
 	{
@@ -108,7 +122,7 @@ public interface OsrsTcgConfig extends Config
 		name = "Safe-mode",
 		description = "Block opening packs while in combat.",
 		section = generalSection,
-		position = 7
+		position = 8
 	)
 	default boolean safeMode()
 	{
@@ -120,7 +134,7 @@ public interface OsrsTcgConfig extends Config
 		name = "Chat prefix colour",
 		description = "Colour of the [OSRS TCG] chat tag.",
 		section = generalSection,
-		position = 8
+		position = 9
 	)
 	default Color chatPrefixColor()
 	{
@@ -132,11 +146,42 @@ public interface OsrsTcgConfig extends Config
 		name = "Debug messages",
 		description = "Show extra plugin details in chat.",
 		section = generalSection,
-		position = 9
+		position = 10
 	)
 	default boolean debugMessages()
 	{
 		return false;
+	}
+
+	@ConfigSection(
+		name = "Duplicates",
+		description = "Duplicates settings.",
+		position = 1
+	)
+	String duplicateSection = "duplicate";
+
+	@ConfigItem(
+		keyName = "keepTier",
+		name = "Keep tier",
+		description = "Keep duplicates for this rarity and higher.",
+		section = duplicateSection,
+		position = 0
+	)
+	default DuplicateKeepTier keepTier()
+	{
+		return DuplicateKeepTier.NONE;
+	}
+	
+	@ConfigItem(
+		keyName = "keepVersion",
+		name = "Keep version",
+		description = "Keep either the newest card or the oldest card of the duplicates.",
+		section = duplicateSection,
+		position = 1
+	)
+	default DuplicateKeepVersion keepVersion()
+	{
+		return DuplicateKeepVersion.NEWEST;
 	}
 
 	@ConfigSection(
