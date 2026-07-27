@@ -16,7 +16,7 @@ can do without opening a separate window happens here: reading their credit bala
 booster packs, selling duplicates, checking collection completion, editing the reward
 multipliers before their collection is locked, opening the album, and resetting the profile.
 
-It is also the largest class in the plugin at 2308 lines, and almost all of that is Swing
+It is also the largest class in the plugin at 2266 lines, and almost all of that is Swing
 construction code. There is no view model and no component reuse: every call to `refresh()`
 tears the selected tab down with `removeAll()` and rebuilds every label, panel, and button from
 scratch ([TcgPanel.java:926-943](../src/main/java/com/osrstcg/ui/TcgPanel.java#L926)). Two
@@ -42,7 +42,7 @@ scroll-pane wrapper — the panel owns its own scrolling, and only for two of th
 
 | Class | Lines | Responsibility |
 |---|---|---|
-| [`ui/TcgPanel`](../src/main/java/com/osrstcg/ui/TcgPanel.java) | 2308 | The whole sidebar: tabs, rendering, refresh scheduling, reveal freeze, reward draft, reset |
+| [`ui/TcgPanel`](../src/main/java/com/osrstcg/ui/TcgPanel.java) | 2266 | The whole sidebar: tabs, rendering, refresh scheduling, reveal freeze, reward draft, reset |
 | [`service/ShopNotificationService`](../src/main/java/com/osrstcg/service/ShopNotificationService.java) | 83 | Edge-triggered "you can now afford pack X" chat message |
 | [`util/NumberFormatting`](../src/main/java/com/osrstcg/util/NumberFormatting.java) | 42 | Space-grouped thousands (`1 234 567`) used across every numeric label |
 | [`util/HtmlEntities`](../src/main/java/com/osrstcg/util/HtmlEntities.java) | 50 | Decodes HTML character references in catalog strings (used by `CardDatabase`, not the panel) |
@@ -106,7 +106,7 @@ Tab buttons are configured by `configureTabButton`
 ([L833](../src/main/java/com/osrstcg/ui/TcgPanel.java#L833)). Clicking one sets `selectedTab`,
 calls `updateTabStyles()`, then `refresh()`. The active tab is `ColorScheme.BRAND_ORANGE` with a
 `LIGHT_GRAY_COLOR` border; inactive tabs are white with `DARKER_GRAY_HOVER_COLOR`
-([`tabBorder`, L2229](../src/main/java/com/osrstcg/ui/TcgPanel.java#L2229)).
+([`tabBorder`, L2187](../src/main/java/com/osrstcg/ui/TcgPanel.java#L2187)).
 
 The initial tab is chosen exactly once by `applyDefaultTabSelectionOnce()`
 ([L555](../src/main/java/com/osrstcg/ui/TcgPanel.java#L555)): Welcome if `openedPacks == 0`,
@@ -167,7 +167,7 @@ order: heading, `TCG_WELCOME_BODY`, the Discord button, the `!tcg` / card-values
 ([L1465](../src/main/java/com/osrstcg/ui/TcgPanel.java#L1465)), then the disclaimer heading and
 body.
 
-`createDiscordButton` ([L2279](../src/main/java/com/osrstcg/ui/TcgPanel.java#L2279)) opens
+`createDiscordButton` ([L2237](../src/main/java/com/osrstcg/ui/TcgPanel.java#L2237)) opens
 `https://discord.gg/P4pPu6RnCj` and is built from `/Discord-Logo-White.png` scaled into a 36px
 button minus 8px vertical padding. It **returns `null` if the image resource is missing**; the
 caller null-checks and omits the button.
@@ -266,7 +266,7 @@ Clicking it runs `promptAndSellDuplicates()`
    only when `creditsToAdd > 0`.
 6. `refresh()`.
 
-`cardDefinitionForName` ([L2171](../src/main/java/com/osrstcg/ui/TcgPanel.java#L2171)) is a
+`cardDefinitionForName` ([L2134](../src/main/java/com/osrstcg/ui/TcgPanel.java#L2134)) is a
 linear scan over the whole card database per lookup, called once per duplicate name.
 
 **Booster grid** — `boosterShopPanel` ([L1817](../src/main/java/com/osrstcg/ui/TcgPanel.java#L1817))
@@ -751,10 +751,10 @@ panel never calls it. It decodes to `(char)` and so mangles code points above U+
 ([L44](../src/main/java/com/osrstcg/util/HtmlEntities.java#L44)); no current catalog entry hits that.
 
 Going the other way, `TcgPanel` has its own three-replacement `htmlEscape`
-([L2207](../src/main/java/com/osrstcg/ui/TcgPanel.java#L2207)), applied to the booster pack title
+([L2165](../src/main/java/com/osrstcg/ui/TcgPanel.java#L2165)), applied to the booster pack title
 only ([L1898](../src/main/java/com/osrstcg/ui/TcgPanel.java#L1898)) — the one place a Swing
 HTML-capable component receives catalog text. `shorten(value, maxLen)`
-([L2216](../src/main/java/com/osrstcg/ui/TcgPanel.java#L2216)) ellipsis-truncates; `statPanel`
+([L2174](../src/main/java/com/osrstcg/ui/TcgPanel.java#L2174)) ellipsis-truncates; `statPanel`
 uses it at 24 chars and keeps the full text in the tooltip.
 
 ## Data flow
@@ -878,11 +878,6 @@ The gaps are real and worth knowing before you add to them:
   every shop refresh proportionally slower.
 - **`updateSellDuplicatesButtonState()` runs a complete sell plan** just to decide
   enabled/disabled ([DuplicateSellPlanner.java:50](../src/main/java/com/osrstcg/service/DuplicateSellPlanner.java#L50)).
-- **`scoreByCardName` and `scoreForCard` are dead.** `rebuildRarityColorMap()`
-  ([L2137](../src/main/java/com/osrstcg/ui/TcgPanel.java#L2137)) is called once from `start()` and
-  populates the map; the only reader is `scoreForCard`
-  ([L2162](../src/main/java/com/osrstcg/ui/TcgPanel.java#L2162)), which has no callers. The
-  display score used by Overview comes from `RarityMath` directly.
 - **`ensureRootAttached()` is defensive only.** Nothing ever removes components from `mainPanel`
   — `stop()` clears the tab content panels, not the root — so the `getComponentCount() == 0`
   branch ([L547](../src/main/java/com/osrstcg/ui/TcgPanel.java#L547)) is currently unreachable.
@@ -917,7 +912,7 @@ the top of the render method and pass it down — never `getWidth()` or `PluginP
 
 **Pin sizes explicitly.** BoxLayout will stretch a component to its maximum size. Every existing
 container ends with either `clampPanelWidth(panel)`
-([L2238](../src/main/java/com/osrstcg/ui/TcgPanel.java#L2238)) — which sets `LEFT_ALIGNMENT` and
+([L2196](../src/main/java/com/osrstcg/ui/TcgPanel.java#L2196)) — which sets `LEFT_ALIGNMENT` and
 caps maximum height at the preferred height — or an explicit `setPreferredSize` +
 `setMaximumSize` pair. Wrapping text needs the measure-then-pin dance from `buildWelcomeTextArea`
 ([L1406](../src/main/java/com/osrstcg/ui/TcgPanel.java#L1406)). Separate blocks with

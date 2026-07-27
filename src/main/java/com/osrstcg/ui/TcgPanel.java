@@ -51,7 +51,6 @@ import java.util.Map;
 import java.util.Set;
 import java.util.concurrent.ForkJoinPool;
 import java.util.concurrent.atomic.AtomicLong;
-import java.util.stream.Collectors;
 import javax.inject.Inject;
 import javax.inject.Named;
 import javax.inject.Singleton;
@@ -184,7 +183,6 @@ public class TcgPanel extends PluginPanel
 	private final JButton welcomeTabButton = new JButton(Tab.WELCOME.getLabel());
 	private final JButton overviewTabButton = new JButton(Tab.OVERVIEW.getLabel());
 	private final JButton shopTabButton = new JButton(Tab.SHOP.getLabel());
-	private final Map<String, Long> scoreByCardName = new HashMap<>();
 	private Tab selectedTab = Tab.OVERVIEW;
 	/** After first in-world refresh, {@link #selectedTab} is only user-driven unless reset clears progress. */
 	private boolean defaultTabSelectionInitialized;
@@ -308,7 +306,6 @@ public class TcgPanel extends PluginPanel
 		{
 			stateService.setDebugLogging(false);
 		}
-		rebuildRarityColorMap();
 		syncRewardDraftFromPersistent();
 		ensureRootAttached();
 		updateWebShareLiveIndicator();
@@ -2134,40 +2131,6 @@ public class TcgPanel extends PluginPanel
 		return NumberFormatting.format(value);
 	}
 
-	private void rebuildRarityColorMap()
-	{
-		scoreByCardName.clear();
-		Map<String, List<CardDefinition>> byCategory = cardDatabase.getCards().stream()
-			.filter(card -> card.getName() != null && !card.getName().trim().isEmpty())
-			.collect(Collectors.groupingBy(CardDefinition::getPrimaryCategory));
-
-		for (List<CardDefinition> pool : byCategory.values())
-		{
-			if (pool.isEmpty())
-			{
-				continue;
-			}
-
-			List<CardDefinition> sorted = new ArrayList<>(pool);
-			sorted.sort((a, b) -> Double.compare(displayScore(a), displayScore(b)));
-			int size = sorted.size();
-			for (int i = 0; i < size; i++)
-			{
-				CardDefinition card = sorted.get(i);
-				scoreByCardName.put(card.getName().toLowerCase(), Math.round(displayScore(card)));
-			}
-		}
-	}
-
-	private long scoreForCard(String cardName)
-	{
-		if (cardName == null)
-		{
-			return 0L;
-		}
-		return scoreByCardName.getOrDefault(cardName.toLowerCase(), 0L);
-	}
-
 	private CardDefinition cardDefinitionForName(String cardName)
 	{
 		if (cardName == null)
@@ -2197,11 +2160,6 @@ public class TcgPanel extends PluginPanel
 		}
 		Integer n = owned.get(new CardCollectionKey(cardName, true));
 		return n != null && n > 0;
-	}
-
-	private double displayScore(CardDefinition card)
-	{
-		return RarityMath.score(card);
 	}
 
 	private static String htmlEscape(String value)

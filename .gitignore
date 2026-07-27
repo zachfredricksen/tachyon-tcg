@@ -5,3 +5,7 @@ bin/
 
 # Debug-only pack definitions
 src/main/resources/PacksDebug.json
+
+# Local Claude Code tooling (conventions + workflow skills), kept out of the repo
+.claude/
+CLAUDE.md
